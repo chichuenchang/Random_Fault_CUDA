@@ -8,6 +8,7 @@
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
+#include <iostream>
 #include <curand.h>
 #include <curand_kernel.h>
 #include <stdio.h>
@@ -24,7 +25,7 @@
 #include "helper.h"         
 
 
-#pragma comment(lib, "freeglut.lib")
+//#pragma comment(lib, "freeglut.lib")
 
 TrackBallC trackball;
 bool mouseLeft, mouseMid, mouseRight;
@@ -46,6 +47,7 @@ GLint fill = 1;
 //CUDA stuff
 float *d_A;
 
+
 void Cleanup(bool noError)
 {
 	cudaError_t error;
@@ -54,9 +56,15 @@ void Cleanup(bool noError)
 	if (!noError || error != cudaSuccess) printf("Something failed \n");
 }
 
-
-
-void RandomFaultsCuda();
+void checkCUDAError(const char* msg)
+{
+	cudaError_t err = cudaGetLastError();
+	if (cudaSuccess != err)
+	{
+		fprintf(stderr, "Cuda error: %s: %s.\n", msg, cudaGetErrorString(err));
+		exit(EXIT_FAILURE);
+	}
+}
 
 void Idle(void)
 {
@@ -91,6 +99,8 @@ void Display(void)
 	glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, materialSpecular);
 	if (fill) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 	else glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+		/*glColor3d(0, 0, 1);
+		glutSolidSphere(1.0, 100, 100);*/
 	for (i = 0; i < MAX - 1; i++)
 	{
 		glBegin(GL_TRIANGLE_STRIP);
@@ -130,12 +140,14 @@ void DisplayUgly(void)
 {
 	int i, j;
 
+
 	glNewList(SCENE, GL_COMPILE);
 	glColor3ub(0, 0, 0);
 	if (fill) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 	else glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 	for (i = 0; i < MAX - 1; i++)
 	{
+		
 		glBegin(GL_QUAD_STRIP);
 		for (j = 0; j < MAX; j++)
 		{
@@ -160,7 +172,6 @@ void Init(void)
 
 }
 
-
 void myReshape(int w, int h)
 {
 	glViewport(0, 0, w, h);
@@ -171,12 +182,148 @@ void myReshape(int w, int h)
 	glOrtho(-0.2, 1.2, -0.2, 1.2, -10, 10);
 }
 
+//random fault CPU===============================================
+
+int ranGen(int max) {//from 0 to MAX
+	return rand() % max;
+}
+
+Vect3d randGenPoint() {
+	return Vect3d((float)ranGen(MAX) / MAX, (float)ranGen(MAX) / MAX, 0.5);
+}
+
+float testImplctPln(Vect3d p_known, Vect3d randNormal, Vect3d p_test) {
+
+	return randNormal.GetX() * (p_known.GetX() - p_test.GetX()) +
+		randNormal.GetY() * (p_known.GetY() - p_test.GetY()) +
+		randNormal.GetZ() * (p_known.GetZ() - p_test.GetZ());
+}
 
 void RandomFault(void)
 {
-	//Write the CPU version here
+
+	Vect3d ranP1, ranP2, normal_knwnPln, normal_RanPln;
+
+	ranP1 = randGenPoint();
+	ranP2 = randGenPoint();
+	normal_knwnPln.Set(0.0, 0.0, 1.0);
+	normal_RanPln.Set(Vect3d::Cross((ranP1 - ranP2), normal_knwnPln));
+
+	for (int i = 0; i < MAX; i++) {
+		for (int j = 0; j < MAX; j++) {
+
+			Vect3d testP((float)i/MAX, (float)j/MAX, 0.5);
+			if (testImplctPln(ranP1, normal_RanPln, testP) > 0) {
+				a[i][j] += 0.001;
+			}
+			else a[i][j] -= 0.001;
+
+		}
+	}
 }
 
+//random fault GPU ====================================================
+	__constant__ float d_const_ranP1[3];
+	__constant__ float d_const_ranP2[3];
+	__constant__ float d_const_nomalGivenPln[3];
+
+	__device__ void crossProd(float *v1, float *v2, float *output) {
+
+		output[0] = v1[1] * v2[2] - v1[2] * v2[1];
+		output[1] = v1[2] * v2[0] - v1[0] * v2[2];
+		output[2] = v1[0] * v2[1] - v1[1] * v2[0];
+	}
+
+	__device__ float testImplct(float* testP) {
+
+		float vec_P1toP2[3] = { d_const_ranP2[0] - d_const_ranP1[0], d_const_ranP2[1] - d_const_ranP1[1], d_const_ranP2[2] - d_const_ranP1[2] };
+		
+		float normal_randPlane[3];
+
+		crossProd(vec_P1toP2, d_const_nomalGivenPln, normal_randPlane);
+
+		//test const pass
+		//printf("test: normal_randPlane = { %f, %f, %f} \n", normal_randPlane[0], normal_randPlane[1], normal_randPlane[2]);
+
+		return normal_randPlane[0] * (d_const_ranP1[0] - testP[0]) +
+			normal_randPlane[1] * (d_const_ranP1[1] - testP[1]) +
+			normal_randPlane[2] * (d_const_ranP1[2] - testP[2]);
+	}
+
+
+
+	__global__ void RandFaultKernel(float a[MAX][MAX],  const int N ) //number of steps to run
+	{
+		int i = blockDim.x * blockIdx.x + threadIdx.x;
+		int j = blockDim.y * blockIdx.y + threadIdx.y;
+		if ((i >= N) || (j >= N)) return;
+
+		float point[3] = { (float)i / MAX, (float)j / MAX, 0.5 };
+
+		if (testImplct(point) > 0) a[i][j] += 0.003;
+		else a[i][j] -= 0.003;
+
+	}
+
+	//pass random point to constant memory
+void prepareConstMem() {
+	cudaError_t err;
+
+	float h_randP1[3] = { (float)ranGen(MAX)/MAX, (float)ranGen(MAX) / MAX , 0.5};
+	float h_randP2[3] = { (float)ranGen(MAX)/MAX, (float)ranGen(MAX) / MAX , 0.5};
+	float h_normalGivenPlan[3] = {0.0, 0.0, 1.0};
+
+	err = cudaMemcpyToSymbol(d_const_ranP1, h_randP1, sizeof(float) * 3);
+	if (err != cudaSuccess) {
+		std::cout << "cuda constant memory copy fail" << std::endl;
+		Cleanup(false);
+	}
+
+	err = cudaMemcpyToSymbol(d_const_ranP2, h_randP2, sizeof(float) * 3);
+	if (err != cudaSuccess) {
+		std::cout << "cuda constant memory copy fail" << std::endl;
+		Cleanup(false);
+	}
+
+	err = cudaMemcpyToSymbol(d_const_nomalGivenPln, h_normalGivenPlan, sizeof(float) * 3);
+	if (err != cudaSuccess) {
+		std::cout << "cuda constant memory copy fail" << std::endl;
+		Cleanup(false);
+	}
+
+}
+
+void RandomFaultsCuda()
+{
+
+	cudaError_t error;
+	const int sizeArray = sizeof(float) * MAX * MAX; 
+
+	//allocate array on the device
+	//sizeArray = sizeof(float) * MAX * MAX; //2D array of floats
+	error = cudaMalloc((void**)&d_A, sizeArray);
+	//Copy the 2D array from host memory to device memory
+	error = cudaMemcpy(d_A, a, sizeArray, cudaMemcpyHostToDevice);
+	if (error != cudaSuccess) Cleanup(false);
+
+	//prepare constant memory
+	prepareConstMem();
+
+	//prepare blocks and grid
+	const int BLOCKSIZE = 16;
+	dim3 dimBlock(BLOCKSIZE, BLOCKSIZE);
+	dim3 dimGrid(ceil((float)MAX / dimBlock.x), ceil((float)MAX / dimBlock.y));
+	// Invoke kernel
+	RandFaultKernel << <dimGrid, dimBlock >> > ((float(*)[MAX])d_A, MAX);
+	error = cudaGetLastError();
+	if (error != cudaSuccess) printf("Something went wrong: %i\n", error);
+	error = cudaThreadSynchronize();
+	if (error != cudaSuccess) { printf("synchronization is wrong\n"); Cleanup(false); }
+	// Copy result from device memory to host memory
+	error = cudaMemcpy(a, d_A, sizeArray, cudaMemcpyDeviceToHost);
+	if (error != cudaSuccess) { printf("could not copy from device\n"); Cleanup(false); }
+	Cleanup(true);
+}
 
 void Key(unsigned char key, GLint i, GLint j)
 {
@@ -186,19 +333,21 @@ void Key(unsigned char key, GLint i, GLint j)
 	case 'F': fill = (fill == 0); glutPostRedisplay(); break;
 	case ' ': //run CPU implementation
 	{
+
 		long t1 = clock();
-		for (int i = 0; i < maxSteps; i++)
-		{
-			char name[200];
-			sprintf(name, "%i%% done\r", 100 * (i + 1) / maxSteps);
-			glutSetWindowTitle(name);
-			RandomFault();
-		}
+		RandomFault();
+		//for (int i = 0; i < maxSteps; i++)
+		//{
+		//	char name[200];
+		//	sprintf(name, "%i%% done\r", 100 * (i + 1) / maxSteps);
+		//	glutSetWindowTitle(name);
+		//}
 		long t2 = clock();
 		glutSetWindowTitle("Random Faults in Cuda");
 		printf("CPU Running time: %i\n", t2 - t1);
 		break;
 	}
+
 	case 'c': //run CUDA implementation
 	{
 		glutSetWindowTitle("Running CUDA");
@@ -256,57 +405,19 @@ void MouseMotion(int x, int y) {
 //	glutPostRedisplay();
 }
 
-__global__ void RandFaultKernel(float a[MAX][MAX],  //2D array of elements
-	const int N, //array is N*N
-	const int n) //number of steps to run
-{
-	int i = blockDim.x*blockIdx.x + threadIdx.x;
-	int j = blockDim.y*blockIdx.y + threadIdx.y;
-	if ((i>=N) || (j>=N)) return;
-//Write the kernel here
-	a[i][j] += (sin((float)i/ blockDim.x)+ cos((float)j / blockDim.y))*0.001;
-}
-
-
-void RandomFaultsCuda()
-{
-	cudaError_t error;
-	int sizeArray;
-
-	//allocate array on the device
-	sizeArray = sizeof(float)*MAX*MAX; //2D array of floats
-	error = cudaMalloc((void**)&d_A, sizeArray);
-	//Copy the 2D array from host memory to device memory
-	error = cudaMemcpy(d_A, a, sizeArray, cudaMemcpyHostToDevice);
-	if (error != cudaSuccess) Cleanup(false);
-
-	//prepare blocks and grid
-	const int BLOCKSIZE = 16;
-	dim3 dimBlock(BLOCKSIZE, BLOCKSIZE);
-	dim3 dimGrid(ceil((float)MAX / dimBlock.x),
-		         ceil((float)MAX / dimBlock.y));
-	// Invoke kernel
-	RandFaultKernel << <dimGrid, dimBlock >> > ((float(*)[MAX])d_A, MAX, maxSteps);
-	error = cudaGetLastError();
-	if (error != cudaSuccess) printf("Something went wrong: %i\n", error);
-	error = cudaThreadSynchronize();
-	if (error != cudaSuccess) { printf("synchronization is wrong\n"); Cleanup(false); }
-	// Copy result from device memory to host memory
-	error = cudaMemcpy(a, d_A, sizeArray, cudaMemcpyDeviceToHost);
-	if (error != cudaSuccess) { printf("could not copy from device\n"); Cleanup(false); }
-	Cleanup(true);
-}
 
 // Host code
 int main(int argc, char** argv)
 {
-	srand(5);
+	std::srand(time(NULL));
+	//srand(5);
 	glutInitWindowSize(wWindow, hWindow);
 	glutInit(&argc, argv);
 	glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA | GLUT_DEPTH);
 	glutCreateWindow("Random Faults");
 	Init();
 	glutDisplayFunc(Display);
+	//glutDisplayFunc(DisplayUgly);
 	glutIdleFunc(Idle);
 	glutKeyboardFunc(Key);
 	glutReshapeFunc(myReshape);
@@ -316,5 +427,4 @@ int main(int argc, char** argv)
 	return 0;
 
 }
-
 

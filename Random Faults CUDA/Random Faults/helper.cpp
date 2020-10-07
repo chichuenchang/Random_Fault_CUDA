@@ -74,7 +74,8 @@ void CoordSyst() {
 	//draw the coordinate system 
 	a.Set(1, 0, 0);
 	b.Set(0, 1, 0);
-	c.Set(Vect3d::Cross(a, b)); //use cross product to find the last vector
+	//c.Set(Vect3d::Cross(a, b)); //use cross product to find the last vector
+	c.Set(0, 0, 1); //use cross product to find the last vector
 	glLineWidth(4);
 	DrawLine(origin, a, red);
 	DrawLine(origin, b, green);
