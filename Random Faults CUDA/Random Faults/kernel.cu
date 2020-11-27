@@ -47,7 +47,6 @@ GLint fill = 1;
 //CUDA stuff
 float *d_A;
 
-
 void Cleanup(bool noError)
 {
 	cudaError_t error;
@@ -250,13 +249,12 @@ void RandomFault(void)
 			normal_randPlane[2] * (d_const_ranP1[2] - testP[2]);
 	}
 
-
-
 	__global__ void RandFaultKernel(float a[MAX][MAX],  const int N ) //number of steps to run
+	//__global__ void RandFaultKernel(float a[MAX], const int N ) //number of steps to run
 	{
 		int i = blockDim.x * blockIdx.x + threadIdx.x;
 		int j = blockDim.y * blockIdx.y + threadIdx.y;
-		if ((i >= N) || (j >= N)) return;
+		if ((i >= N) || (j >= N)) return;//let threads out of N not to compute anything
 
 		float point[3] = { (float)i / MAX, (float)j / MAX, 0.5 };
 
@@ -266,6 +264,7 @@ void RandomFault(void)
 	}
 
 	//pass random point to constant memory
+	//no need to free
 void prepareConstMem() {
 	cudaError_t err;
 
@@ -315,6 +314,7 @@ void RandomFaultsCuda()
 	dim3 dimGrid(ceil((float)MAX / dimBlock.x), ceil((float)MAX / dimBlock.y));
 	// Invoke kernel
 	RandFaultKernel << <dimGrid, dimBlock >> > ((float(*)[MAX])d_A, MAX);
+	//RandFaultKernel << <dimGrid, dimBlock >> > (&d_A, MAX);
 	error = cudaGetLastError();
 	if (error != cudaSuccess) printf("Something went wrong: %i\n", error);
 	error = cudaThreadSynchronize();
